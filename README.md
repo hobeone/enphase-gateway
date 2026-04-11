@@ -70,6 +70,7 @@ The gateway serial number is visible in the Enphase app under **System > Devices
 | `Production` | `/api/v1/production` | Aggregate energy totals (today / 7-day / lifetime) and current watts. Works without CTs. |
 | `Inverters` | `/api/v1/production/inverters` | Per-microinverter last-reported wattage. Useful for detecting underperforming panels. |
 | `Energy` | `/ivp/pdm/energy` | Energy totals broken down by meter type (PCU, RGM, EIM). |
+| `BatteryInventory` | `/ivp/ensemble/inventory` | Live battery telemetry: SOC, temperatures, firmware, RF signal, grid mode. Richer than `Devices`. |
 | `Devices` | `/ivp/ensemble/device_list` | Encharge battery inventory with capacity and DER index. |
 | `SystemInfo` | `/info` | Hardware ID and firmware version. No auth required. Returns XML. |
 
@@ -122,6 +123,60 @@ case gateway.IsUnauthorized(err): // JWT expired — re-fetch
 case gateway.IsNotFound(err):     // endpoint absent (e.g. no CTs installed)
 case err != nil:                  // network error or unexpected status
 }
+```
+
+## Live streaming
+
+`StreamLiveData` enables the gateway's push stream and delivers frames to a callback as they arrive (~2 frames/second). It handles the enable POST, opens a persistent GET, and routes SSE or concatenated-JSON wire formats automatically.
+
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+for {
+    err := client.StreamLiveData(ctx, func(ld gateway.LiveData) error {
+        snap := gateway.SnapshotFromLiveData(ld)
+        fmt.Printf("solar=%.0fW  load=%.0fW  grid=%.0fW\n",
+            snap.SolarW, snap.LoadW, snap.GridW)
+        return nil
+    })
+    if err != nil || ctx.Err() != nil {
+        break
+    }
+    // StreamLiveData returns nil on clean EOF (gateway closed connection).
+    // Reconnect immediately; the gateway re-enables the stream on the next POST.
+}
+```
+
+To stop early from inside the callback, return `gateway.ErrStopStream` — `StreamLiveData` will return `nil` (not an error).
+
+`EnableLiveStream` is also exported for callers that want to activate the push stream and poll `/ivp/livedata/status` themselves.
+
+## livedata-watch
+
+`cmd/livedata-watch` is a small CLI that streams (or polls) `/ivp/livedata/status` and prints a human-readable summary for each frame.
+
+```sh
+# Stream mode (default) — gateway pushes ~2 frames/second:
+go run github.com/hobeone/enphase-gateway/cmd/livedata-watch -config probe_cfg.json
+
+# Poll mode — fetch once per interval:
+go run github.com/hobeone/enphase-gateway/cmd/livedata-watch -config probe_cfg.json -poll 5s
+
+# Skip cloud auth with a pre-fetched JWT:
+go run github.com/hobeone/enphase-gateway/cmd/livedata-watch -addr 192.168.1.10 -jwt eyJ...
+```
+
+Example output:
+
+```
+━━━  2026-04-11 10:40:29  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  solar            885.9 W
+  battery         -943.0 W  (SOC 40%, 4099 Wh)
+  grid            1768.9 W  (importing)
+  load            1711.9 W
+  solar→load         0.0 W  →grid: 0.0 W  →batt: 943.0 W
+  self-sufficiency: 0%
 ```
 
 ## Integration probe
