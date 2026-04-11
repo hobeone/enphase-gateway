@@ -1017,6 +1017,7 @@ func TestClient_StreamLiveData_SSEFormat(t *testing.T) {
 	mux.HandleFunc("/ivp/livedata/status", func(w http.ResponseWriter, r *http.Request) {
 		// Write one frame in SSE format with a preceding metadata line and
 		// an empty separator line — both should be skipped.
+		w.Header().Set("Content-Type", "text/event-stream")
 		frame, _ := json.Marshal(map[string]any{
 			"meters": map[string]any{"pv": map[string]any{"agg_p_mw": int64(5000000)}},
 		})

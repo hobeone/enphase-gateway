@@ -109,15 +109,28 @@ func main() {
 	}
 }
 
-// runStream enables the gateway push stream and prints each frame as it arrives.
+// runStream enables the gateway push stream and prints each frame as it
+// arrives.  If the gateway closes the connection it reconnects automatically.
 func runStream(ctx context.Context, client *gateway.Client) {
-	fmt.Fprintln(os.Stderr, "enabling stream mode ...")
-	err := client.StreamLiveData(ctx, func(ld gateway.LiveData) error {
-		printFrame(ld)
-		return nil
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		fatalf("stream error: %v", err)
+	fmt.Fprintln(os.Stderr, "enabling stream ...")
+	for {
+		err := client.StreamLiveData(ctx, func(ld gateway.LiveData) error {
+			printFrame(ld)
+			return nil
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stream error: %v — reconnecting ...\n", err)
+		}
+		// Brief pause before reconnecting so we don't hammer the gateway
+		// if it is transiently unavailable.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 }
 

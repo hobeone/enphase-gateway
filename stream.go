@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -70,37 +69,66 @@ func (c *Client) EnableLiveStream(ctx context.Context) error {
 	return nil
 }
 
-// StreamLiveData enables the gateway's push stream and reads a continuous
-// series of LiveData frames, calling fn for each one.
+// StreamLiveData enables the gateway's push stream and reads LiveData frames
+// from a single persistent GET /ivp/livedata/status connection, calling fn
+// for each frame received.
 //
 // It blocks until one of the following:
+//   - the gateway closes the connection — returns nil
 //   - ctx is cancelled — returns ctx.Err()
 //   - fn returns ErrStopStream — returns nil
 //   - fn returns any other error — returns that error
-//   - the gateway closes the connection — returns nil
 //
-// The gateway pushes frames at roughly 1-second intervals. The HTTP connection
-// is kept open for the entire duration of the call, so the client's timeout is
-// bypassed — context cancellation is the intended way to stop the stream.
+// The gateway pushes frames at roughly 1-second intervals once the stream is
+// enabled. The HTTP connection stays open for the call's duration; the
+// client-level Timeout is bypassed and context cancellation is the intended
+// way to stop the stream.
+//
+// If the gateway closes the connection and you want to keep receiving frames,
+// call StreamLiveData again (or use a loop in your own code).
 //
 // Example:
 //
 //	ctx, cancel := context.WithCancel(context.Background())
 //	defer cancel()
-//	err := client.StreamLiveData(ctx, func(ld gateway.LiveData) error {
-//	    snap := gateway.SnapshotFromLiveData(ld)
-//	    fmt.Printf("solar=%.0fW  load=%.0fW\n", snap.SolarW, snap.LoadW)
-//	    return nil
-//	})
+//	for {
+//	    err := client.StreamLiveData(ctx, func(ld gateway.LiveData) error {
+//	        snap := gateway.SnapshotFromLiveData(ld)
+//	        fmt.Printf("solar=%.0fW  load=%.0fW\n", snap.SolarW, snap.LoadW)
+//	        return nil
+//	    })
+//	    if err != nil || ctx.Err() != nil {
+//	        break
+//	    }
+//	}
 func (c *Client) StreamLiveData(ctx context.Context, fn func(LiveData) error) error {
 	if err := c.EnableLiveStream(ctx); err != nil {
 		return err
 	}
 
+	// Use a no-timeout client that shares the underlying transport (TLS config,
+	// connection pooling). The client-level Timeout would kill a long-lived
+	// streaming connection; context cancellation handles termination instead.
+	streamClient := &http.Client{Transport: c.httpClient.Transport}
+
+	err := c.readStream(ctx, streamClient, fn)
+	if errors.Is(err, ErrStopStream) {
+		return nil
+	}
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+// readStream opens one GET /ivp/livedata/status and drains it until EOF,
+// calling fn for each frame. Returns ErrStopStream if fn requests a stop,
+// nil on clean EOF, or an error on any other failure.
+func (c *Client) readStream(ctx context.Context, streamClient *http.Client, fn func(LiveData) error) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.baseURL+"/ivp/livedata/status", nil)
 	if err != nil {
-		return fmt.Errorf("build stream request /ivp/livedata/status: %w", err)
+		return fmt.Errorf("build stream request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	c.mu.RLock()
@@ -110,14 +138,9 @@ func (c *Client) StreamLiveData(ctx context.Context, fn func(LiveData) error) er
 		req.Header.Set("Authorization", "Bearer "+jwt)
 	}
 
-	// Use a no-timeout client that shares the underlying transport (TLS config,
-	// connection pooling). The client-level Timeout would kill a long-lived
-	// streaming connection; context cancellation handles termination instead.
-	streamClient := &http.Client{Transport: c.httpClient.Transport}
-
 	resp, err := streamClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("open stream /ivp/livedata/status: %w", err)
+		return fmt.Errorf("open stream: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -125,40 +148,82 @@ func (c *Client) StreamLiveData(ctx context.Context, fn func(LiveData) error) er
 		return &Error{StatusCode: resp.StatusCode, Endpoint: "/ivp/livedata/status"}
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+	// Choose a decoder based on Content-Type:
+	//   text/event-stream → SSE lines ("data: {...}\n\n")
+	//   anything else     → concatenated JSON objects (json.Decoder)
+	//
+	// json.Decoder.Decode consumes exactly one JSON value per call regardless
+	// of whitespace, making it correct for both plain JSON and NDJSON. The SSE
+	// path is kept for gateways that send text/event-stream.
+	ct := resp.Header.Get("Content-Type")
+	if strings.Contains(ct, "text/event-stream") {
+		return readSSE(resp.Body, fn)
+	}
+	return readJSON(resp.Body, fn)
+}
 
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Handle both SSE ("data: {...}") and plain NDJSON ("{...}").
-		line = strings.TrimPrefix(line, "data: ")
-
-		// Skip empty lines and SSE metadata lines (":heartbeat", "event: ...").
-		if line == "" || line[0] != '{' {
-			continue
-		}
-
+// readJSON parses a stream of concatenated JSON objects using json.Decoder.
+// This handles both single-response gateways and persistent chunked streams.
+func readJSON(r io.Reader, fn func(LiveData) error) error {
+	dec := json.NewDecoder(r)
+	for {
 		var frame LiveData
-		if err := json.Unmarshal([]byte(line), &frame); err != nil {
-			continue // skip malformed frames; don't abort the stream
-		}
-
-		if err := fn(frame); err != nil {
-			if errors.Is(err, ErrStopStream) {
-				return nil
+		if err := dec.Decode(&frame); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil // clean end-of-stream; caller reconnects if needed
 			}
+			return fmt.Errorf("decode stream frame: %w", err)
+		}
+		if err := fn(frame); err != nil {
 			return err
 		}
 	}
+}
 
-	if err := scanner.Err(); err != nil {
-		// If the context was cancelled the scanner error is a consequence of
-		// the body being closed; return the more informative context error.
-		if ctx.Err() != nil {
-			return ctx.Err()
+// readSSE parses a Server-Sent Events stream, extracting JSON payloads from
+// "data: {...}" lines and skipping comments and event-type lines.
+func readSSE(r io.Reader, fn func(LiveData) error) error {
+	buf := make([]byte, 64*1024)
+	var acc []byte
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			acc = append(acc, buf[:n]...)
+			acc = processSSEBuffer(acc, fn)
 		}
-		return fmt.Errorf("read stream: %w", err)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil
+			}
+			return fmt.Errorf("read SSE stream: %w", err)
+		}
 	}
-	return ctx.Err()
+}
+
+// processSSEBuffer scans acc for complete SSE lines, dispatches any "data:"
+// lines to fn, and returns the unconsumed tail.
+func processSSEBuffer(acc []byte, fn func(LiveData) error) []byte {
+	for {
+		idx := bytes.IndexByte(acc, '\n')
+		if idx < 0 {
+			return acc // incomplete line — wait for more data
+		}
+		line := strings.TrimRight(string(acc[:idx]), "\r")
+		acc = acc[idx+1:]
+
+		if line == "" || strings.HasPrefix(line, ":") || strings.HasPrefix(line, "event:") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if len(data) == 0 || data[0] != '{' {
+			continue
+		}
+		var frame LiveData
+		if err := json.Unmarshal([]byte(data), &frame); err != nil {
+			continue // skip malformed frames
+		}
+		if err := fn(frame); err != nil {
+			return acc // caller inspects the error via readSSE's return
+		}
+	}
 }
