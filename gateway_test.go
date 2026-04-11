@@ -389,73 +389,78 @@ func TestClient_Energy(t *testing.T) {
 
 // ---------- SnapshotFromLiveData ----------
 
-func TestSnapshotFromLiveData_Exporting(t *testing.T) {
-	// Scenario: solar 4000W, battery charging 500W, home load 1500W,
-	// surplus 2000W being exported to grid.
-	ld := gateway.LiveData{}
-	ld.Meters.LastUpdate = 1700000000
-	ld.Meters.PV.AggPowerMW = 4000_000      // 4000 W solar
-	ld.Meters.Storage.AggPowerMW = -500_000  // -500 W = charging
-	ld.Meters.Grid.AggPowerMW = -2000_000    // -2000 W = exporting
-	ld.Meters.Load.AggPowerMW = 1500_000     // 1500 W load
-	ld.Meters.EncAggSOC = 45
-	ld.Meters.EncAggEnergy = 5000
-
-	s := gateway.SnapshotFromLiveData(ld)
-
-	assertEqual(t, "SolarW", 4000.0, s.SolarW)
-	assertEqual(t, "BatteryW", -500.0, s.BatteryW)
-	assertEqual(t, "GridW", -2000.0, s.GridW)
-	assertEqual(t, "LoadW", 1500.0, s.LoadW)
-	assertEqual(t, "BatterySOC", 45, s.BatterySOC)
-	assertEqual(t, "BatteryWh", 5000, s.BatteryWh)
-
-	// Derived flows.
-	assertEqual(t, "SolarToGrid", 2000.0, s.SolarToGrid)
-	assertEqual(t, "GridToLoad", 0.0, s.GridToLoad)
-	assertEqual(t, "BattToLoad", 0.0, s.BattToLoad)
-	assertEqual(t, "SolarToBatt", 500.0, s.SolarToBatt)
-	assertEqual(t, "SolarToLoad", 1500.0, s.SolarToLoad)
-
-	if !s.IsExporting() {
-		t.Error("expected IsExporting() = true")
+func TestSnapshotFromLiveData(t *testing.T) {
+	type meters struct {
+		pvMW, storageMW, gridMW, loadMW int64
+		soc, energyWh                   int
 	}
-	if s.IsImporting() {
-		t.Error("expected IsImporting() = false")
+	type want struct {
+		solarW, batteryW, gridW, loadW float64
+		battSOC, battWh                int
+		solarToGrid, gridToLoad        float64
+		battToLoad, solarToBatt        float64
+		solarToLoad                    float64
+		exporting, importing           bool
+		charging, discharging          bool
 	}
-	if !s.IsCharging() {
-		t.Error("expected IsCharging() = true")
+	cases := []struct {
+		name string
+		in   meters
+		want want
+	}{
+		{
+			name: "exporting_solar_surplus",
+			// Solar 4000W, battery charging 500W, load 1500W → 2000W exported.
+			in: meters{pvMW: 4000_000, storageMW: -500_000, gridMW: -2000_000, loadMW: 1500_000, soc: 45, energyWh: 5000},
+			want: want{
+				solarW: 4000, batteryW: -500, gridW: -2000, loadW: 1500,
+				battSOC: 45, battWh: 5000,
+				solarToGrid: 2000, solarToBatt: 500, solarToLoad: 1500,
+				exporting: true, charging: true,
+			},
+		},
+		{
+			name: "importing_battery_discharging",
+			// No solar, battery discharging 1000W, load 3000W → 2000W from grid.
+			in: meters{storageMW: 1000_000, gridMW: 2000_000, loadMW: 3000_000, soc: 20},
+			want: want{
+				batteryW: 1000, gridW: 2000, loadW: 3000,
+				battSOC: 20,
+				gridToLoad: 2000, battToLoad: 1000,
+				importing: true, discharging: true,
+			},
+		},
 	}
-}
 
-func TestSnapshotFromLiveData_Importing(t *testing.T) {
-	// Scenario: no solar, battery discharging 1000W, home drawing 3000W,
-	// so 2000W coming from grid.
-	ld := gateway.LiveData{}
-	ld.Meters.LastUpdate = 1700000000
-	ld.Meters.PV.AggPowerMW = 0
-	ld.Meters.Storage.AggPowerMW = 1000_000 // 1000 W discharging
-	ld.Meters.Grid.AggPowerMW = 2000_000    // 2000 W importing
-	ld.Meters.Load.AggPowerMW = 3000_000    // 3000 W load
-	ld.Meters.EncAggSOC = 20
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ld := gateway.LiveData{}
+			ld.Meters.LastUpdate = 1700000000
+			ld.Meters.PV.AggPowerMW = tc.in.pvMW
+			ld.Meters.Storage.AggPowerMW = tc.in.storageMW
+			ld.Meters.Grid.AggPowerMW = tc.in.gridMW
+			ld.Meters.Load.AggPowerMW = tc.in.loadMW
+			ld.Meters.EncAggSOC = tc.in.soc
+			ld.Meters.EncAggEnergy = tc.in.energyWh
 
-	s := gateway.SnapshotFromLiveData(ld)
+			s := gateway.SnapshotFromLiveData(ld)
 
-	assertEqual(t, "SolarW", 0.0, s.SolarW)
-	assertEqual(t, "BatteryW", 1000.0, s.BatteryW)
-	assertEqual(t, "GridW", 2000.0, s.GridW)
-	assertEqual(t, "LoadW", 3000.0, s.LoadW)
-
-	assertEqual(t, "SolarToGrid", 0.0, s.SolarToGrid)
-	assertEqual(t, "GridToLoad", 2000.0, s.GridToLoad)
-	assertEqual(t, "BattToLoad", 1000.0, s.BattToLoad)
-	assertEqual(t, "SolarToLoad", 0.0, s.SolarToLoad)
-
-	if !s.IsImporting() {
-		t.Error("expected IsImporting() = true")
-	}
-	if !s.IsDischarging() {
-		t.Error("expected IsDischarging() = true")
+			assertEqual(t, "SolarW", tc.want.solarW, s.SolarW)
+			assertEqual(t, "BatteryW", tc.want.batteryW, s.BatteryW)
+			assertEqual(t, "GridW", tc.want.gridW, s.GridW)
+			assertEqual(t, "LoadW", tc.want.loadW, s.LoadW)
+			assertEqual(t, "BatterySOC", tc.want.battSOC, s.BatterySOC)
+			assertEqual(t, "BatteryWh", tc.want.battWh, s.BatteryWh)
+			assertEqual(t, "SolarToGrid", tc.want.solarToGrid, s.SolarToGrid)
+			assertEqual(t, "GridToLoad", tc.want.gridToLoad, s.GridToLoad)
+			assertEqual(t, "BattToLoad", tc.want.battToLoad, s.BattToLoad)
+			assertEqual(t, "SolarToBatt", tc.want.solarToBatt, s.SolarToBatt)
+			assertEqual(t, "SolarToLoad", tc.want.solarToLoad, s.SolarToLoad)
+			assertEqual(t, "IsExporting", tc.want.exporting, s.IsExporting())
+			assertEqual(t, "IsImporting", tc.want.importing, s.IsImporting())
+			assertEqual(t, "IsCharging", tc.want.charging, s.IsCharging())
+			assertEqual(t, "IsDischarging", tc.want.discharging, s.IsDischarging())
+		})
 	}
 }
 

@@ -35,12 +35,8 @@ type EnergySnapshot struct {
 }
 
 // SnapshotFromLiveData computes an EnergySnapshot from a LiveData response.
-//
-// The LiveData sign conventions for Storage differ from EnergySnapshot:
-// in LiveData, Storage.AggPowerMW is negative when charging (the battery
-// is consuming power) and positive when discharging (supplying power).
-// SnapshotFromLiveData normalises this so BatteryW follows the same
-// positive=supplying / negative=consuming convention as GridW.
+// All milliwatt values from LiveData are converted to watts; sign conventions
+// are preserved as-is (see EnergySnapshot field comments for the conventions).
 func SnapshotFromLiveData(d LiveData) EnergySnapshot {
 	s := EnergySnapshot{
 		Timestamp:  time.Unix(d.Meters.LastUpdate, 0),

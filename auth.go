@@ -13,13 +13,30 @@ import (
 	"time"
 )
 
-// EnlightenBaseURL is the Enphase cloud login endpoint.
-// Overridable in tests.
-var EnlightenBaseURL = "https://enlighten.enphaseenergy.com"
+const (
+	defaultEnlightenBaseURL = "https://enlighten.enphaseenergy.com"
+	defaultEntrezBaseURL    = "https://entrez.enphaseenergy.com"
+)
 
-// EntrezBaseURL is the Enphase token issuance endpoint.
-// Overridable in tests.
-var EntrezBaseURL = "https://entrez.enphaseenergy.com"
+// AuthOption configures FetchJWT behaviour.
+type AuthOption func(*authConfig)
+
+type authConfig struct {
+	enlightenBaseURL string
+	entrezBaseURL    string
+}
+
+// WithEnlightenURL overrides the Enphase cloud login base URL.
+// Primarily useful in tests.
+func WithEnlightenURL(u string) AuthOption {
+	return func(c *authConfig) { c.enlightenBaseURL = u }
+}
+
+// WithEntrezURL overrides the Enphase token issuance base URL.
+// Primarily useful in tests.
+func WithEntrezURL(u string) AuthOption {
+	return func(c *authConfig) { c.entrezBaseURL = u }
+}
 
 // TokenResponse is the result of a successful JWT fetch.
 type TokenResponse struct {
@@ -44,7 +61,15 @@ func (t TokenResponse) Expiry() time.Time {
 // The returned JWT is valid for one year when using system owner credentials.
 // serial is the IQ Gateway serial number (visible in the Enphase app under
 // System > Devices > Gateway).
-func FetchJWT(ctx context.Context, username, password, serial string) (TokenResponse, error) {
+func FetchJWT(ctx context.Context, username, password, serial string, opts ...AuthOption) (TokenResponse, error) {
+	cfg := authConfig{
+		enlightenBaseURL: defaultEnlightenBaseURL,
+		entrezBaseURL:    defaultEntrezBaseURL,
+	}
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return TokenResponse{}, fmt.Errorf("create cookie jar: %w", err)
@@ -53,7 +78,7 @@ func FetchJWT(ctx context.Context, username, password, serial string) (TokenResp
 
 	// Step 1: authenticate to get a session_id.
 	loginBody, err := doPost(ctx, client,
-		EnlightenBaseURL+"/login/login.json",
+		cfg.enlightenBaseURL+"/login/login.json",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{
 			"user[email]":    {username},
@@ -81,7 +106,7 @@ func FetchJWT(ctx context.Context, username, password, serial string) (TokenResp
 		return TokenResponse{}, fmt.Errorf("marshal token request: %w", err)
 	}
 	raw, err := doPost(ctx, client,
-		EntrezBaseURL+"/tokens",
+		cfg.entrezBaseURL+"/tokens",
 		"application/json",
 		bytes.NewReader(tokenPayload),
 	)

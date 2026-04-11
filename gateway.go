@@ -39,6 +39,23 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// Gateway is the interface implemented by Client. Embed or accept this
+// interface in your own types so you can substitute a test double in
+// unit tests without hitting a real IQ Gateway.
+type Gateway interface {
+	LiveData(ctx context.Context) (LiveData, error)
+	MeterReadings(ctx context.Context) ([]CTReading, error)
+	GridReadings(ctx context.Context) ([]GridReading, error)
+	Meters(ctx context.Context) ([]MeterConfig, error)
+	Consumption(ctx context.Context) (ConsumptionReport, error)
+	Production(ctx context.Context) (ProductionData, error)
+	Inverters(ctx context.Context) ([]InverterReading, error)
+	Energy(ctx context.Context) (EnergyData, error)
+	Devices(ctx context.Context) (DeviceList, error)
+	SystemInfo(ctx context.Context) (SystemInfo, error)
+	SetJWT(jwt string)
+}
+
 // Option configures a Client at construction time.
 type Option func(*Client)
 

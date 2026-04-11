@@ -25,6 +25,9 @@ type CTChannel struct {
 // CTReading is the aggregate reading for one installed CT, plus a per-phase
 // channel breakdown. The gateway reports one CTReading per installed CT:
 // typically production (eid ~704643328), storage, and net-consumption.
+//
+// The embedded CTChannel fields (EID, ActivePower, Voltage, etc.) are the
+// CT-level aggregate across all phases. Channels holds the per-phase detail.
 type CTReading struct {
 	CTChannel
 	Channels []CTChannel `json:"channels"`

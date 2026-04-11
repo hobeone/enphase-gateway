@@ -11,6 +11,12 @@ const (
 	DeviceTypeMicroinverter DeviceType = 14
 )
 
+// DeviceInfo holds device-specific detail embedded in each Device record.
+type DeviceInfo struct {
+	Capacity int `json:"capacity"`  // Wh (batteries only)
+	DERIndex int `json:"DER_Index"` // Connected phase: 1=L1, 2=L2, 3=L3
+}
+
 // Device is a single provisioned device on the IQ Gateway.
 type Device struct {
 	SerialNumber    string     `json:"serial_number"`
@@ -18,10 +24,7 @@ type Device struct {
 	ComInterface    int        `json:"com_interface"`
 	ComInterfaceStr string     `json:"com_interface_str"` // e.g. "CAN"
 	Status          string     `json:"status"`            // "Connected", "Unknown", etc.
-	DevInfo         struct {
-		Capacity int `json:"capacity"`  // Wh (batteries only)
-		DERIndex int `json:"DER_Index"` // Connected phase: 1=L1, 2=L2, 3=L3
-	} `json:"dev_info"`
+	DevInfo         DeviceInfo `json:"dev_info"`
 }
 
 // DeviceList is the response from GET /ivp/ensemble/device_list.
