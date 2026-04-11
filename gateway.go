@@ -52,6 +52,7 @@ type Gateway interface {
 	Inverters(ctx context.Context) ([]InverterReading, error)
 	Energy(ctx context.Context) (EnergyData, error)
 	Devices(ctx context.Context) (DeviceList, error)
+	BatteryInventory(ctx context.Context) ([]BatteryStatus, error)
 	SystemInfo(ctx context.Context) (SystemInfo, error)
 	SetJWT(jwt string)
 }

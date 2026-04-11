@@ -4,13 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/hobeone/enphase-gateway"
 )
+
+// Compile-time assertion: *Client must satisfy the Gateway interface.
+// If Client stops implementing any method, this line fails to compile.
+var _ gateway.Gateway = (*gateway.Client)(nil)
+
+// ─────────────────────────── test helpers ────────────────────────────────────
 
 // newTestClient creates a gateway Client pointed at a test server.
 // The test server's HTTP client is used so TLS is bypassed entirely.
@@ -18,8 +26,7 @@ func newTestClient(srv *httptest.Server, jwt string) *gateway.Client {
 	return gateway.NewClient(srv.URL, jwt, gateway.WithHTTPClient(srv.Client()))
 }
 
-// serve registers a handler for path on a new httptest.Server and returns
-// the server and a cancellation function.
+// serve registers a handler for path on a new httptest.Server and returns the server.
 func serve(t *testing.T, path string, handler http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -50,9 +57,68 @@ func assertBearerToken(t *testing.T, r *http.Request, want string) {
 	}
 }
 
-// ---------- LiveData ----------
+// ─────────────────────────── FetchJWT ────────────────────────────────────────
+
+func TestFetchJWT(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wantUser   = "user@example.com"
+		wantSerial = "serial123"
+		// Minimal valid JWT: header.{"exp":1690568380}.dummy-signature
+		fakeJWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" +
+			".eyJleHAiOjE2OTA1NjgzODB9" +
+			".dummy_signature"
+	)
+
+	// Step 1 server: Enphase login → returns session_id.
+	loginSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/login/login.json" {
+			t.Errorf("login: unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{"session_id": "sess-abc"}); err != nil {
+			t.Errorf("encode session_id: %v", err)
+		}
+	}))
+	defer loginSrv.Close()
+
+	// Step 2 server: Entrez token exchange → returns JWT.
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tokens" {
+			t.Errorf("token: unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{"token": fakeJWT}); err != nil {
+			t.Errorf("encode token: %v", err)
+		}
+	}))
+	defer tokenSrv.Close()
+
+	resp, err := gateway.FetchJWT(context.Background(), wantUser, "password", wantSerial,
+		gateway.WithEnlightenURL(loginSrv.URL),
+		gateway.WithEntrezURL(tokenSrv.URL),
+	)
+	if err != nil {
+		t.Fatalf("FetchJWT: %v", err)
+	}
+	if resp.Token != fakeJWT {
+		t.Errorf("Token = %q, want %q", resp.Token, fakeJWT)
+	}
+	// Expiry should be extracted from the JWT's exp claim even when the server
+	// returns only a raw token string (not a JSON object with expires_at).
+	if resp.ExpiresAt == 0 {
+		t.Error("ExpiresAt should be populated from JWT exp claim")
+	}
+	if resp.Expiry().IsZero() {
+		t.Error("Expiry() should return a non-zero time")
+	}
+}
+
+// ─────────────────────────── LiveData ────────────────────────────────────────
 
 func TestClient_LiveData(t *testing.T) {
+	t.Parallel()
 	const jwt = "test-jwt"
 
 	payload := map[string]any{
@@ -61,15 +127,15 @@ func TestClient_LiveData(t *testing.T) {
 			"auth_state": "ok",
 		},
 		"meters": map[string]any{
-			"last_update":   int64(1700000000),
-			"soc":           85,
-			"enc_agg_soc":   85,
+			"last_update":    int64(1700000000),
+			"soc":            85,
+			"enc_agg_soc":    85,
 			"enc_agg_energy": 8000,
-			"pv":            map[string]any{"agg_p_mw": int64(3500000)},   // 3500 W
-			"storage":       map[string]any{"agg_p_mw": int64(-800000)},   // -800 W (charging)
-			"grid":          map[string]any{"agg_p_mw": int64(0)},
-			"load":          map[string]any{"agg_p_mw": int64(2700000)},   // 2700 W
-			"generator":     map[string]any{"agg_p_mw": int64(0)},
+			"pv":             map[string]any{"agg_p_mw": int64(3500000)},  // 3500 W
+			"storage":        map[string]any{"agg_p_mw": int64(-800000)},  // -800 W (charging)
+			"grid":           map[string]any{"agg_p_mw": int64(0)},
+			"load":           map[string]any{"agg_p_mw": int64(2700000)},  // 2700 W
+			"generator":      map[string]any{"agg_p_mw": int64(0)},
 		},
 	}
 
@@ -88,6 +154,9 @@ func TestClient_LiveData(t *testing.T) {
 	if ld.Meters.EncAggSOC != 85 {
 		t.Errorf("EncAggSOC = %d, want 85", ld.Meters.EncAggSOC)
 	}
+	if ld.Meters.EncAggEnergy != 8000 {
+		t.Errorf("EncAggEnergy = %d, want 8000", ld.Meters.EncAggEnergy)
+	}
 	if ld.Meters.PV.AggPowerMW != 3500000 {
 		t.Errorf("PV.AggPowerMW = %d, want 3500000", ld.Meters.PV.AggPowerMW)
 	}
@@ -103,6 +172,7 @@ func TestClient_LiveData(t *testing.T) {
 }
 
 func TestClient_LiveData_Unauthorized(t *testing.T) {
+	t.Parallel()
 	srv := serve(t, "/ivp/livedata/status", serveJSON(t, http.StatusUnauthorized, nil))
 	defer srv.Close()
 
@@ -112,9 +182,10 @@ func TestClient_LiveData_Unauthorized(t *testing.T) {
 	}
 }
 
-// ---------- GridReadings ----------
+// ─────────────────────────── GridReadings ────────────────────────────────────
 
 func TestClient_GridReadings(t *testing.T) {
+	t.Parallel()
 	payload := []map[string]any{
 		{
 			"channels": []map[string]any{
@@ -146,9 +217,10 @@ func TestClient_GridReadings(t *testing.T) {
 	}
 }
 
-// ---------- MeterReadings ----------
+// ─────────────────────────── MeterReadings ───────────────────────────────────
 
 func TestClient_MeterReadings(t *testing.T) {
+	t.Parallel()
 	payload := []map[string]any{
 		{
 			"eid":         704643328,
@@ -177,6 +249,7 @@ func TestClient_MeterReadings(t *testing.T) {
 }
 
 func TestClient_MeterReadings_NotFound(t *testing.T) {
+	t.Parallel()
 	srv := serve(t, "/ivp/meters/readings", serveJSON(t, http.StatusNotFound, nil))
 	defer srv.Close()
 
@@ -186,9 +259,10 @@ func TestClient_MeterReadings_NotFound(t *testing.T) {
 	}
 }
 
-// ---------- Production ----------
+// ─────────────────────────── Production ──────────────────────────────────────
 
 func TestClient_Production(t *testing.T) {
+	t.Parallel()
 	payload := map[string]any{
 		"wattHoursToday":     21674,
 		"wattHoursSevenDays": 719543,
@@ -211,9 +285,10 @@ func TestClient_Production(t *testing.T) {
 	}
 }
 
-// ---------- Inverters ----------
+// ─────────────────────────── Inverters ───────────────────────────────────────
 
 func TestClient_Inverters(t *testing.T) {
+	t.Parallel()
 	payload := []map[string]any{
 		{"serialNumber": "121935144671", "lastReportDate": int64(1654171836), "devType": 1, "lastReportWatts": 285, "maxReportWatts": 300},
 		{"serialNumber": "121935144672", "lastReportDate": int64(1654171836), "devType": 1, "lastReportWatts": 290, "maxReportWatts": 300},
@@ -237,9 +312,10 @@ func TestClient_Inverters(t *testing.T) {
 	}
 }
 
-// ---------- Meters (config) ----------
+// ─────────────────────────── Meters (config) ─────────────────────────────────
 
 func TestClient_Meters(t *testing.T) {
+	t.Parallel()
 	payload := []map[string]any{
 		{"eid": 704643328, "state": "enabled", "measurementType": "production", "phaseMode": "split", "phaseCount": 2, "meteringStatus": "normal"},
 		{"eid": 704643584, "state": "enabled", "measurementType": "net-consumption", "phaseMode": "split", "phaseCount": 2, "meteringStatus": "normal"},
@@ -260,9 +336,10 @@ func TestClient_Meters(t *testing.T) {
 	}
 }
 
-// ---------- Consumption ----------
+// ─────────────────────────── Consumption ─────────────────────────────────────
 
 func TestClient_Consumption(t *testing.T) {
+	t.Parallel()
 	payload := map[string]any{
 		"createdAt":  int64(1654625079),
 		"reportType": "net-consumption",
@@ -288,9 +365,22 @@ func TestClient_Consumption(t *testing.T) {
 	}
 }
 
-// ---------- Devices ----------
+func TestClient_Consumption_NotFound(t *testing.T) {
+	t.Parallel()
+	// Consumption requires a CT to be installed; gateways without one return 404.
+	srv := serve(t, "/ivp/meters/reports/consumption", serveJSON(t, http.StatusNotFound, nil))
+	defer srv.Close()
+
+	_, err := newTestClient(srv, "tok").Consumption(context.Background())
+	if !gateway.IsNotFound(err) {
+		t.Errorf("expected IsNotFound, got %v", err)
+	}
+}
+
+// ─────────────────────────── Devices ─────────────────────────────────────────
 
 func TestClient_Devices(t *testing.T) {
+	t.Parallel()
 	payload := map[string]any{
 		"usb": map[string]any{"ck2_bridge": "connected", "auto_scan": "false"},
 		"devices": []map[string]any{
@@ -318,13 +408,14 @@ func TestClient_Devices(t *testing.T) {
 	}
 }
 
-// ---------- SystemInfo (XML) ----------
+// ─────────────────────────── SystemInfo (XML) ────────────────────────────────
 
 func TestClient_SystemInfo(t *testing.T) {
+	t.Parallel()
 	xmlBody, _ := xml.Marshal(struct {
-		XMLName  xml.Name `xml:"envoy_info"`
-		Time     int64    `xml:"time"`
-		Device   struct {
+		XMLName xml.Name `xml:"envoy_info"`
+		Time    int64    `xml:"time"`
+		Device  struct {
 			SN       string `xml:"sn"`
 			Software string `xml:"software"`
 		} `xml:"device"`
@@ -337,7 +428,10 @@ func TestClient_SystemInfo(t *testing.T) {
 	})
 
 	srv := serve(t, "/info", func(w http.ResponseWriter, r *http.Request) {
-		// /info does not require a JWT; verify no auth header is mandatory.
+		// /info is the one unauthenticated endpoint — it must NOT forward the JWT.
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("/info should not send Authorization header, got %q", got)
+		}
 		w.Header().Set("Content-Type", "application/xml")
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write(xmlBody); err != nil {
@@ -346,7 +440,8 @@ func TestClient_SystemInfo(t *testing.T) {
 	})
 	defer srv.Close()
 
-	info, err := newTestClient(srv, "").SystemInfo(context.Background())
+	// Pass a non-empty JWT to confirm SystemInfo doesn't forward it.
+	info, err := newTestClient(srv, "some-jwt").SystemInfo(context.Background())
 	if err != nil {
 		t.Fatalf("SystemInfo: %v", err)
 	}
@@ -358,9 +453,10 @@ func TestClient_SystemInfo(t *testing.T) {
 	}
 }
 
-// ---------- Energy ----------
+// ─────────────────────────── Energy ──────────────────────────────────────────
 
 func TestClient_Energy(t *testing.T) {
+	t.Parallel()
 	payload := map[string]any{
 		"production": map[string]any{
 			"pcu": map[string]any{"wattHoursToday": 13251, "wattsNow": 596},
@@ -387,9 +483,39 @@ func TestClient_Energy(t *testing.T) {
 	}
 }
 
-// ---------- SnapshotFromLiveData ----------
+// ─────────────────────────── SetJWT ──────────────────────────────────────────
+
+func TestClient_SetJWT_Concurrent(t *testing.T) {
+	t.Parallel()
+
+	// A minimal server that always succeeds so we can fire requests freely.
+	srv := serve(t, "/ivp/livedata/status", serveJSON(t, http.StatusOK, map[string]any{
+		"connection": map[string]any{},
+		"meters":     map[string]any{},
+	}))
+	defer srv.Close()
+
+	client := newTestClient(srv, "initial-jwt")
+
+	var wg sync.WaitGroup
+	for i := range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client.SetJWT(fmt.Sprintf("jwt-%d", i))
+			_, _ = client.LiveData(context.Background())
+		}()
+	}
+	wg.Wait()
+	// No explicit assertion — the race detector (-race) catches any concurrent
+	// access violation in SetJWT's mutex or the jwt field in doJSON.
+}
+
+// ─────────────────────────── SnapshotFromLiveData ────────────────────────────
 
 func TestSnapshotFromLiveData(t *testing.T) {
+	t.Parallel()
+
 	type meters struct {
 		pvMW, storageMW, gridMW, loadMW int64
 		soc, energyWh                   int
@@ -430,10 +556,23 @@ func TestSnapshotFromLiveData(t *testing.T) {
 				importing: true, discharging: true,
 			},
 		},
+		{
+			name: "solar_to_load_clamps_at_zero_on_measurement_noise",
+			// SolarToGrid + SolarToBatt exceed solar production (as can happen with
+			// sensor noise) — SolarToLoad must clamp to 0, not go negative.
+			in: meters{pvMW: 3000_000, storageMW: -2000_000, gridMW: -2000_000, loadMW: 0},
+			want: want{
+				solarW: 3000, batteryW: -2000, gridW: -2000, loadW: 0,
+				solarToGrid: 2000, solarToBatt: 2000,
+				solarToLoad: 0,
+				exporting: true, charging: true,
+			},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ld := gateway.LiveData{}
 			ld.Meters.LastUpdate = 1700000000
 			ld.Meters.PV.AggPowerMW = tc.in.pvMW
@@ -465,11 +604,13 @@ func TestSnapshotFromLiveData(t *testing.T) {
 }
 
 func TestSnapshotFromLiveData_SelfSufficiency(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
-		name    string
-		loadW   float64
-		gridW   float64
-		want    float64
+		name  string
+		loadW float64
+		gridW float64
+		want  float64
 	}{
 		{"fully_off_grid", 2000, 0, 1.0},
 		{"half_grid", 2000, 1000, 0.5},
@@ -479,6 +620,7 @@ func TestSnapshotFromLiveData_SelfSufficiency(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ld := gateway.LiveData{}
 			ld.Meters.Load.AggPowerMW = int64(tc.loadW * 1000)
 			ld.Meters.Grid.AggPowerMW = int64(tc.gridW * 1000)
@@ -490,13 +632,12 @@ func TestSnapshotFromLiveData_SelfSufficiency(t *testing.T) {
 	}
 }
 
-// ---------- ParseExpiry ----------
+// ─────────────────────────── ParseExpiry ─────────────────────────────────────
 
 func TestParseExpiry(t *testing.T) {
-	// Build a minimal JWT with a known exp claim.
-	// Header: {"alg":"HS256","typ":"JWT"}
-	// Payload: {"exp":1690568380}
-	// (Signature is a dummy; we never verify it.)
+	t.Parallel()
+	// Header: {"alg":"HS256","typ":"JWT"}  Payload: {"exp":1690568380}
+	// Signature is a dummy — ParseExpiry never verifies it.
 	const rawJWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" +
 		".eyJleHAiOjE2OTA1NjgzODB9" +
 		".dummy_signature"
@@ -513,6 +654,8 @@ func TestParseExpiry(t *testing.T) {
 }
 
 func TestParseExpiry_InvalidJWT(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct{ name, jwt string }{
 		{"empty", ""},
 		{"one_part", "notajwt"},
@@ -522,6 +665,7 @@ func TestParseExpiry_InvalidJWT(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if _, err := gateway.ParseExpiry(tc.jwt); err == nil {
 				t.Errorf("expected error for JWT %q, got nil", tc.jwt)
 			}
@@ -529,9 +673,10 @@ func TestParseExpiry_InvalidJWT(t *testing.T) {
 	}
 }
 
-// ---------- Error helpers ----------
+// ─────────────────────────── Error helpers ───────────────────────────────────
 
 func TestIsUnauthorized(t *testing.T) {
+	t.Parallel()
 	srv := serve(t, "/ivp/livedata/status", serveJSON(t, http.StatusUnauthorized, nil))
 	defer srv.Close()
 
@@ -545,6 +690,7 @@ func TestIsUnauthorized(t *testing.T) {
 }
 
 func TestIsNotFound(t *testing.T) {
+	t.Parallel()
 	srv := serve(t, "/ivp/meters/readings", serveJSON(t, http.StatusNotFound, nil))
 	defer srv.Close()
 
@@ -554,32 +700,39 @@ func TestIsNotFound(t *testing.T) {
 	}
 }
 
-// ---------- MeterSummary.ActiveWatts ----------
+// ─────────────────────────── MeterSummary.ActiveWatts ────────────────────────
 
 func TestMeterSummary_ActiveWatts(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
+		name string
 		mw   int64
 		want float64
 	}{
-		{0, 0},
-		{1000, 1},
-		{3500000, 3500},
-		{-800000, -800},
+		{"zero", 0, 0},
+		{"one_watt", 1000, 1},
+		{"typical_solar", 3500000, 3500},
+		{"negative_charging", -800000, -800},
 	}
 	for _, tc := range cases {
-		m := gateway.MeterSummary{AggPowerMW: tc.mw}
-		if got := m.ActiveWatts(); got != tc.want {
-			t.Errorf("ActiveWatts(%d mW) = %.3f, want %.3f", tc.mw, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := gateway.MeterSummary{AggPowerMW: tc.mw}
+			if got := m.ActiveWatts(); got != tc.want {
+				t.Errorf("ActiveWatts(%d mW) = %.3f, want %.3f", tc.mw, got, tc.want)
+			}
+		})
 	}
 }
 
-// ---------- Context cancellation ----------
+// ─────────────────────────── Context cancellation ────────────────────────────
 
 func TestClient_LiveData_ContextCancelled(t *testing.T) {
+	t.Parallel()
+
 	srv := serve(t, "/ivp/livedata/status", func(w http.ResponseWriter, r *http.Request) {
-		// Block until the client gives up.
-		<-r.Context().Done()
+		<-r.Context().Done() // block until the client gives up
 	})
 	defer srv.Close()
 
@@ -592,7 +745,81 @@ func TestClient_LiveData_ContextCancelled(t *testing.T) {
 	}
 }
 
-// ---------- helpers ----------
+// ─────────────────────────── BatteryInventory ────────────────────────────────
+
+func TestClient_BatteryInventory(t *testing.T) {
+	t.Parallel()
+	// The endpoint returns a top-level array; each element covers one device
+	// class. Only the "ENCHARGE" element carries battery telemetry.
+	payload := []map[string]any{
+		{
+			"type": "ENCHARGE",
+			"devices": []map[string]any{
+				{
+					"serial_num":          "492203012345",
+					"percentFull":         82,
+					"temperature":         24,
+					"maxCellTemp":         25,
+					"encharge_capacity":   4960,
+					"phase":               "ph-a",
+					"Enchg_grid_mode":     "multimode-ongrid",
+					"admin_state_str":     "adminOn",
+					"communicating":       true,
+					"comm_level_sub_ghz":  4,
+					"comm_level_2_4_ghz":  3,
+					"img_pnum_running":    "2.6.4813",
+					"device_status":       []string{"envoy.global.ok"},
+					"last_rpt_date":       1712345678,
+				},
+			},
+		},
+		{
+			"type":    "ENPOWER",
+			"devices": []map[string]any{},
+		},
+	}
+
+	srv := serve(t, "/ivp/ensemble/inventory", serveJSON(t, http.StatusOK, payload))
+	defer srv.Close()
+
+	batteries, err := newTestClient(srv, "tok").BatteryInventory(context.Background())
+	if err != nil {
+		t.Fatalf("BatteryInventory: %v", err)
+	}
+	if len(batteries) != 1 {
+		t.Fatalf("len = %d, want 1", len(batteries))
+	}
+	b := batteries[0]
+	assertEqual(t, "SerialNum", "492203012345", b.SerialNum)
+	assertEqual(t, "PercentFull", 82, b.PercentFull)
+	assertEqual(t, "Temperature", 24, b.Temperature)
+	assertEqual(t, "CapacityWh", 4960, b.CapacityWh)
+	assertEqual(t, "GridMode", "multimode-ongrid", b.GridMode)
+	assertEqual(t, "Communicating", true, b.Communicating)
+	assertEqual(t, "CommLevelSubGHz", 4, b.CommLevelSubGHz)
+	assertEqual(t, "Firmware", "2.6.4813", b.Firmware)
+}
+
+func TestClient_BatteryInventory_NoEncharge(t *testing.T) {
+	t.Parallel()
+	// Gateway with no Encharge units returns only an ENPOWER entry.
+	payload := []map[string]any{
+		{"type": "ENPOWER", "devices": []map[string]any{}},
+	}
+
+	srv := serve(t, "/ivp/ensemble/inventory", serveJSON(t, http.StatusOK, payload))
+	defer srv.Close()
+
+	batteries, err := newTestClient(srv, "tok").BatteryInventory(context.Background())
+	if err != nil {
+		t.Fatalf("BatteryInventory: %v", err)
+	}
+	if len(batteries) != 0 {
+		t.Errorf("len = %d, want 0", len(batteries))
+	}
+}
+
+// ─────────────────────────── helpers ─────────────────────────────────────────
 
 func assertEqual[T comparable](t *testing.T, name string, want, got T) {
 	t.Helper()
