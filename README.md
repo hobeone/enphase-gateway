@@ -124,6 +124,66 @@ case err != nil:                  // network error or unexpected status
 }
 ```
 
+## Integration probe
+
+`cmd/gateway-probe` is a command-line tool that exercises every API endpoint against a real gateway and prints the full HTTP exchange — request headers, raw response body, and the parsed Go struct — for each call. It is useful for validating parsing logic against live data and for inspecting undocumented fields in gateway responses.
+
+**Build and run:**
+
+```sh
+go run github.com/hobeone/enphase-gateway/cmd/gateway-probe -config probe.json
+```
+
+**Config file** (`probe.json`) — recommended over flags to keep credentials out of shell history:
+
+```json
+{
+  "addr":     "envoy.local",
+  "username": "user@example.com",
+  "password": "s3cr3t",
+  "serial":   "123456789012"
+}
+```
+
+**Flags** (all override the config file):
+
+| Flag | Description |
+|------|-------------|
+| `-config` | Path to JSON config file (default: `probe.json`) |
+| `-addr` | Gateway hostname or IP |
+| `-username` | Enphase account email |
+| `-password` | Enphase account password |
+| `-serial` | Gateway serial number |
+| `-jwt` | Pre-fetched JWT; skips cloud auth entirely |
+
+**Example output** (one endpoint shown):
+
+```
+════════════════════════════════════════════════════════
+  LiveData              GET /ivp/livedata/status
+════════════════════════════════════════════════════════
+→ GET https://envoy.local/ivp/livedata/status
+  Accept: application/json
+  Authorization: [redacted]
+← 200 OK  (843 bytes)
+  {
+    "connection": { "auth_state": "ok", ... },
+    "meters": { "pv": { "agg_p_mw": 3412000 }, ... }
+  }
+
+  parsed →
+  { "Connection": { "AuthState": "ok" }, "Meters": { ... } }
+
+  snapshot summary:
+    Solar:      3412.0 W
+    Battery:    -800.0 W  (SOC 72%, 3600 Wh stored)
+    Grid:          0.0 W  (balanced)
+    Load:        2612.0 W
+    Self-sufficiency: 100%
+```
+
+Endpoints that return 404 on non-metered gateways (`MeterReadings`, `Consumption`) print a bracketed note and continue rather than aborting the run.
+
 ## Requirements
 
 - Go 1.22+
