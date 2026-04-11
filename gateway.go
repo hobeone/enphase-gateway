@@ -54,6 +54,8 @@ type Gateway interface {
 	Devices(ctx context.Context) (DeviceList, error)
 	BatteryInventory(ctx context.Context) ([]BatteryStatus, error)
 	SystemInfo(ctx context.Context) (SystemInfo, error)
+	EnableLiveStream(ctx context.Context) error
+	StreamLiveData(ctx context.Context, fn func(LiveData) error) error
 	SetJWT(jwt string)
 }
 
