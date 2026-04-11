@@ -119,6 +119,7 @@ func runStream(ctx context.Context, client *gateway.Client) {
 			return nil
 		})
 		if ctx.Err() != nil {
+			fmt.Fprintf(os.Stderr, "context error: %v\n", ctx.Err())
 			return
 		}
 		if err != nil {
@@ -130,6 +131,7 @@ func runStream(ctx context.Context, client *gateway.Client) {
 		case <-ctx.Done():
 			return
 		case <-time.After(500 * time.Millisecond):
+			fmt.Println("Reconnecting")
 		}
 	}
 }

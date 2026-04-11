@@ -33,10 +33,11 @@ const defaultTimeout = 15 * time.Second
 // by default, which is required for local-network gateway access.
 // Client is safe for concurrent use.
 type Client struct {
-	baseURL    string
-	mu         sync.RWMutex
-	jwt        string
-	httpClient *http.Client
+	baseURL         string
+	mu              sync.RWMutex
+	jwt             string
+	httpClient      *http.Client       // used for all regular (non-streaming) API calls
+	streamTransport http.RoundTripper  // dedicated transport for the persistent stream GET
 }
 
 // Gateway is the interface implemented by Client. Embed or accept this
@@ -77,19 +78,29 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
+// newTLSTransport returns a fresh *http.Transport that skips TLS verification.
+// Each call produces an independent transport with its own connection pool.
+func newTLSTransport() *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // gateway self-signed cert by design
+	}
+}
+
 // NewClient creates a Client targeting the given gateway address.
 // addr may be a bare hostname ("envoy.local", "192.168.1.10") or a full URL
 // ("https://envoy.local"). When no scheme is present, HTTPS is assumed.
 // The self-signed TLS certificate is accepted automatically.
+//
+// Regular API calls and the persistent LiveData stream use separate HTTP
+// transports so they never share a TCP connection. This prevents the gateway
+// from closing the stream when concurrent scrape requests arrive.
 func NewClient(addr, jwt string, opts ...Option) *Client {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // gateway self-signed cert by design
-	}
 	c := &Client{
-		baseURL: toBaseURL(addr),
-		jwt:     jwt,
+		baseURL:         toBaseURL(addr),
+		jwt:             jwt,
+		streamTransport: newTLSTransport(),
 		httpClient: &http.Client{
-			Transport: transport,
+			Transport: newTLSTransport(),
 			Timeout:   defaultTimeout,
 		},
 	}

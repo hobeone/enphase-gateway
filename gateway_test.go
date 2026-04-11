@@ -952,9 +952,12 @@ func TestClient_StreamLiveData_ErrStopStream(t *testing.T) {
 	// Returning ErrStopStream from the callback should stop iteration and
 	// return nil to the caller — it is not an error condition.
 	makeFrame := func(pvMW int64) map[string]any {
-		return map[string]any{"meters": map[string]any{
-			"pv": map[string]any{"agg_p_mw": pvMW},
-		}}
+		return map[string]any{
+			"connection": map[string]any{"sc_stream": "enabled"},
+			"meters": map[string]any{
+				"pv": map[string]any{"agg_p_mw": pvMW},
+			},
+		}
 	}
 	srv := streamMux(t, "enabled", []map[string]any{
 		makeFrame(1000000),
@@ -1019,7 +1022,8 @@ func TestClient_StreamLiveData_SSEFormat(t *testing.T) {
 		// an empty separator line — both should be skipped.
 		w.Header().Set("Content-Type", "text/event-stream")
 		frame, _ := json.Marshal(map[string]any{
-			"meters": map[string]any{"pv": map[string]any{"agg_p_mw": int64(5000000)}},
+			"connection": map[string]any{"sc_stream": "enabled"},
+			"meters":     map[string]any{"pv": map[string]any{"agg_p_mw": int64(5000000)}},
 		})
 		fmt.Fprintf(w, ": heartbeat\n")
 		fmt.Fprintf(w, "data: %s\n", frame)

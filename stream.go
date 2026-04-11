@@ -69,9 +69,18 @@ func (c *Client) EnableLiveStream(ctx context.Context) error {
 	return nil
 }
 
-// StreamLiveData enables the gateway's push stream and reads LiveData frames
-// from a single persistent GET /ivp/livedata/status connection, calling fn
-// for each frame received.
+// errStreamDisabled is an internal sentinel returned when the first LiveData
+// frame reports sc_stream != "enabled". StreamLiveData catches it, POSTs to
+// activate the stream via EnableLiveStream, and retries the connection.
+var errStreamDisabled = errors.New("stream not enabled")
+
+// StreamLiveData reads LiveData frames from a persistent GET /ivp/livedata/status
+// connection, calling fn for each frame received.
+//
+// On the first frame it checks the Connection.SCStream field. If the gateway
+// reports the stream is not yet active, EnableLiveStream is called once to
+// activate it and the connection is retried. This avoids unconditional POSTs
+// that can disrupt a stream that is already running.
 //
 // It blocks until one of the following:
 //   - the gateway closes the connection — returns nil
@@ -102,23 +111,46 @@ func (c *Client) EnableLiveStream(ctx context.Context) error {
 //	    }
 //	}
 func (c *Client) StreamLiveData(ctx context.Context, fn func(LiveData) error) error {
-	if err := c.EnableLiveStream(ctx); err != nil {
-		return err
-	}
+	// Use the dedicated stream transport — a completely separate connection pool
+	// from the regular API transport. This prevents the gateway from closing the
+	// persistent stream GET when concurrent scrape requests arrive on other
+	// connections. No timeout is set; context cancellation stops the stream.
+	streamClient := &http.Client{Transport: c.streamTransport}
 
-	// Use a no-timeout client that shares the underlying transport (TLS config,
-	// connection pooling). The client-level Timeout would kill a long-lived
-	// streaming connection; context cancellation handles termination instead.
-	streamClient := &http.Client{Transport: c.httpClient.Transport}
+	// enableAttempted guards against an infinite loop: if the stream reports
+	// disabled even after we POST to enable it, return the error rather than
+	// retrying again.
+	enableAttempted := false
 
-	err := c.readStream(ctx, streamClient, fn)
-	if errors.Is(err, ErrStopStream) {
-		return nil
+	for {
+		// Wrap fn to inspect sc_stream on the first frame only.
+		streamConfirmed := false
+		err := c.readStream(ctx, streamClient, func(ld LiveData) error {
+			if !streamConfirmed {
+				if ld.Connection.SCStream != "enabled" {
+					return errStreamDisabled
+				}
+				streamConfirmed = true
+			}
+			return fn(ld)
+		})
+
+		switch {
+		case errors.Is(err, errStreamDisabled) && !enableAttempted:
+			// Stream isn't active yet — POST to enable it once, then retry.
+			if enErr := c.EnableLiveStream(ctx); enErr != nil {
+				return enErr
+			}
+			enableAttempted = true
+			continue
+		case errors.Is(err, ErrStopStream):
+			return nil
+		case err != nil && ctx.Err() != nil:
+			return ctx.Err()
+		default:
+			return err
+		}
 	}
-	if err != nil && ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return err
 }
 
 // readStream opens one GET /ivp/livedata/status and drains it until EOF,
