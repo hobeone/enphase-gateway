@@ -2,6 +2,8 @@
 
 A Go client for the **Enphase IQ Gateway** local REST API. Reads real-time solar production, battery state, grid flow, and per-inverter data directly from the gateway on your LAN — no cloud polling required after the initial JWT fetch.
 
+Based on this API Doc: https://enphase.com/download/iq-gateway-local-apis-or-ui-access-using-token
+
 ```
 import "github.com/hobeone/enphase-gateway"
 ```
