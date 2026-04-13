@@ -33,11 +33,10 @@ const defaultTimeout = 15 * time.Second
 // by default, which is required for local-network gateway access.
 // Client is safe for concurrent use.
 type Client struct {
-	baseURL         string
-	mu              sync.RWMutex
-	jwt             string
-	httpClient      *http.Client       // used for all regular (non-streaming) API calls
-	streamTransport http.RoundTripper  // dedicated transport for the persistent stream GET
+	baseURL    string
+	mu         sync.RWMutex
+	jwt        string
+	httpClient *http.Client
 }
 
 // Gateway is the interface implemented by Client. Embed or accept this
@@ -55,8 +54,7 @@ type Gateway interface {
 	Devices(ctx context.Context) (DeviceList, error)
 	BatteryInventory(ctx context.Context) ([]BatteryStatus, error)
 	SystemInfo(ctx context.Context) (SystemInfo, error)
-	EnableLiveStream(ctx context.Context) error
-	StreamLiveData(ctx context.Context, fn func(LiveData) error) error
+	EnableHighFrequencyMode(ctx context.Context) error
 	SetJWT(jwt string)
 }
 
@@ -90,15 +88,10 @@ func newTLSTransport() *http.Transport {
 // addr may be a bare hostname ("envoy.local", "192.168.1.10") or a full URL
 // ("https://envoy.local"). When no scheme is present, HTTPS is assumed.
 // The self-signed TLS certificate is accepted automatically.
-//
-// Regular API calls and the persistent LiveData stream use separate HTTP
-// transports so they never share a TCP connection. This prevents the gateway
-// from closing the stream when concurrent scrape requests arrive.
 func NewClient(addr, jwt string, opts ...Option) *Client {
 	c := &Client{
-		baseURL:         toBaseURL(addr),
-		jwt:             jwt,
-		streamTransport: newTLSTransport(),
+		baseURL: toBaseURL(addr),
+		jwt:     jwt,
 		httpClient: &http.Client{
 			Transport: newTLSTransport(),
 			Timeout:   defaultTimeout,

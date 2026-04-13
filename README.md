@@ -125,42 +125,38 @@ case err != nil:                  // network error or unexpected status
 }
 ```
 
-## Live streaming
+## High-frequency mode
 
-`StreamLiveData` enables the gateway's push stream and delivers frames to a callback as they arrive (~2 frames/second). It handles the enable POST, opens a persistent GET, and routes SSE or concatenated-JSON wire formats automatically.
+By default, the gateway refreshes `/ivp/livedata/status` on a ~5-second cycle. `EnableHighFrequencyMode` POSTs to `/ivp/livedata/stream` to switch the gateway into a ~1-second refresh cycle. The mode persists until the gateway reboots.
+
+After enabling, poll `LiveData` in a loop to receive frequent updates:
 
 ```go
-ctx, cancel := context.WithCancel(context.Background())
-defer cancel()
-
+if err := client.EnableHighFrequencyMode(ctx); err != nil {
+    log.Fatal(err)
+}
 for {
-    err := client.StreamLiveData(ctx, func(ld gateway.LiveData) error {
-        snap := gateway.SnapshotFromLiveData(ld)
+    live, err := client.LiveData(ctx)
+    if err != nil {
+        log.Print(err)
+    } else {
+        snap := gateway.SnapshotFromLiveData(live)
         fmt.Printf("solar=%.0fW  load=%.0fW  grid=%.0fW\n",
             snap.SolarW, snap.LoadW, snap.GridW)
-        return nil
-    })
-    if err != nil || ctx.Err() != nil {
-        break
     }
-    // StreamLiveData returns nil on clean EOF (gateway closed connection).
-    // Reconnect immediately; the gateway re-enables the stream on the next POST.
+    time.Sleep(time.Second)
 }
 ```
 
-To stop early from inside the callback, return `gateway.ErrStopStream` — `StreamLiveData` will return `nil` (not an error).
-
-`EnableLiveStream` is also exported for callers that want to activate the push stream and poll `/ivp/livedata/status` themselves.
-
 ## livedata-watch
 
-`cmd/livedata-watch` is a small CLI that streams (or polls) `/ivp/livedata/status` and prints a human-readable summary for each frame.
+`cmd/livedata-watch` is a small CLI that polls `/ivp/livedata/status` and prints a human-readable summary for each reading.
 
 ```sh
-# Stream mode (default) — gateway pushes ~2 frames/second:
+# High-frequency mode (default) — enables ~1-second gateway refresh, polls at 1s:
 go run github.com/hobeone/enphase-gateway/cmd/livedata-watch -config probe_cfg.json
 
-# Poll mode — fetch once per interval:
+# Custom poll interval:
 go run github.com/hobeone/enphase-gateway/cmd/livedata-watch -config probe_cfg.json -poll 5s
 
 # Skip cloud auth with a pre-fetched JWT:

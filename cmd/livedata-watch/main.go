@@ -1,15 +1,15 @@
-// livedata-watch connects to an Enphase IQ Gateway and streams live power-flow
-// data from /ivp/livedata/status, printing a human-readable summary for each
-// frame received.  By default it uses the gateway's push-stream mode
-// (POST /ivp/livedata/stream then read a continuous HTTP response); pass
-// -poll <duration> to fall back to periodic polling instead.
+// livedata-watch connects to an Enphase IQ Gateway and prints live power-flow
+// data from /ivp/livedata/status.  By default it enables the gateway's
+// high-frequency data collection mode (POST /ivp/livedata/stream) and polls
+// /ivp/livedata/status at ~1-second intervals; pass -poll <duration> to use a
+// custom polling interval instead.
 //
 // Usage:
 //
-//	# Stream mode (default) — gateway pushes ~1 frame/second:
+//	# High-frequency mode (default) — ~1-second data refresh:
 //	livedata-watch -config probe_cfg.json
 //
-//	# Poll mode — fetch once per interval:
+//	# Custom poll interval:
 //	livedata-watch -config probe_cfg.json -poll 5s
 //
 //	# Skip cloud auth if you already have a JWT:
@@ -105,33 +105,32 @@ func main() {
 	if *poll > 0 {
 		runPoll(ctx, client, *poll)
 	} else {
-		runStream(ctx, client)
+		runHighFreq(ctx, client)
 	}
 }
 
-// runStream enables the gateway push stream and prints each frame as it
-// arrives.  If the gateway closes the connection it reconnects automatically.
-func runStream(ctx context.Context, client *gateway.Client) {
-	fmt.Fprintln(os.Stderr, "enabling stream ...")
+// runHighFreq enables high-frequency data collection on the gateway and polls
+// /ivp/livedata/status at ~1-second intervals, printing each reading.
+func runHighFreq(ctx context.Context, client *gateway.Client) {
+	fmt.Fprintln(os.Stderr, "enabling high-frequency mode ...")
+	if err := client.EnableHighFrequencyMode(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "enable high-frequency mode: %v\n", err)
+		return
+	}
 	for {
-		err := client.StreamLiveData(ctx, func(ld gateway.LiveData) error {
-			printFrame(ld)
-			return nil
-		})
-		if ctx.Err() != nil {
-			fmt.Fprintf(os.Stderr, "context error: %v\n", ctx.Err())
-			return
-		}
+		ld, err := client.LiveData(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "stream error: %v — reconnecting ...\n", err)
+			if ctx.Err() != nil {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		} else {
+			printFrame(ld)
 		}
-		// Brief pause before reconnecting so we don't hammer the gateway
-		// if it is transiently unavailable.
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(500 * time.Millisecond):
-			fmt.Println("Reconnecting")
+		case <-time.After(time.Second):
 		}
 	}
 }

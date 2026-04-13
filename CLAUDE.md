@@ -37,29 +37,24 @@ The JWT is valid for ~1 year (system owner credentials). `ParseExpiry` in `token
 
 `Client` in `gateway.go` wraps an `*http.Client` with a mutex-guarded JWT. All JSON endpoints go through `doJSON()`. The one XML outlier is `SystemInfo` (`/info`), which has its own request path in `system.go` — it's the only endpoint that requires no JWT and returns XML.
 
-The `Gateway` interface in `gateway.go` covers all methods including `BatteryInventory`, `EnableLiveStream`, and `StreamLiveData`. Embed it in test doubles or mock implementations.
+The `Gateway` interface in `gateway.go` covers all methods including `BatteryInventory` and `EnableHighFrequencyMode`. Embed it in test doubles or mock implementations.
 
 ### Sign convention split
 
 Raw `LiveData` fields use Enphase's conventions (Storage: negative = charging, positive = discharging; Grid: negative = exporting). `EnergySnapshot` in `snapshot.go` normalises everything to an intuitive model (positive = supplying power to the home). `SnapshotFromLiveData` is the bridge. Power values in `LiveData`/`MeterSummary` are in **milliwatts**; `EnergySnapshot` converts to Watts.
 
-### Streaming
+### High-frequency mode
 
-`stream.go` adds push-stream support:
+`stream.go` contains a single exported function:
 
-- `EnableLiveStream`: POST `{"enable":1}` to `/ivp/livedata/stream`, verify `sc_stream == "enabled"`.
-- `StreamLiveData`: calls `EnableLiveStream`, creates a no-timeout `http.Client` (shares underlying `Transport`; a timeout would kill the long-lived connection), then opens one persistent GET to `/ivp/livedata/status`. Routes to `readSSE` if `Content-Type: text/event-stream`, else `readJSON`.
-- `readJSON`: uses `json.Decoder.Decode` in a loop — handles concatenated JSON regardless of newlines (important: `bufio.Scanner.ScanLines` would block on frames with no trailing `\n`).
-- `readSSE` + `processSSEBuffer`: manual byte-level SSE parsing; strips `data: ` prefix, skips `:` comments and `event:` lines.
-- `ErrStopStream`: sentinel that callbacks return to stop iteration cleanly; `StreamLiveData` converts it to `nil`.
-- Reconnect logic lives in the application layer (`cmd/livedata-watch`), not in the library — keeps the library simple and avoids infinite loops in tests.
+- `EnableHighFrequencyMode`: POST `{"enable":1}` to `/ivp/livedata/stream`, verify `sc_stream == "enabled"`. This switches the gateway's internal data collection cycle from ~5 seconds to ~1 second. The mode persists across calls but resets on reboot. After calling this, use `LiveData` in a polling loop — there is no persistent connection or push mechanism.
 
 ### API surface by file
 
 | File | Endpoint | Notes |
 |------|----------|-------|
 | `livedata.go` | `GET /ivp/livedata/status` | Best source for real-time monitoring; all sources simultaneously |
-| `stream.go` | `POST /ivp/livedata/stream` + persistent `GET /ivp/livedata/status` | Push-stream; ~2 frames/second; handles SSE and concatenated JSON |
+| `stream.go` | `POST /ivp/livedata/stream` | Enables ~1-second gateway data refresh; poll `LiveData` in a loop after calling |
 | `inventory.go` | `GET /ivp/ensemble/inventory` | Rich per-battery telemetry: SOC, temps, firmware, RF signal, grid mode |
 | `readings.go` | `GET /ivp/meters/readings` | CT-based readings; 5-min refresh; 404 on non-metered gateways |
 | `grid.go` | `GET /ivp/meters/gridReading` | Per-phase grid readings |

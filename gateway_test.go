@@ -819,19 +819,13 @@ func TestClient_BatteryInventory_NoEncharge(t *testing.T) {
 	}
 }
 
-// ─────────────────────────── EnableLiveStream / StreamLiveData ───────────────
+// ─────────────────────────── EnableHighFrequencyMode ────────────────────────
 
-// streamMux builds an httptest.Server with handlers for both the enable POST
-// and the streaming GET, making it easy to exercise the full streaming path.
-//
-// enableStatus is the sc_stream value the POST handler returns.
-// frames are written as newline-delimited JSON to the GET handler; the handler
-// closes the connection after all frames are written, which causes StreamLiveData
-// to return naturally.
-func streamMux(t *testing.T, enableStatus string, frames []map[string]any) *httptest.Server {
+// enableModeMux builds an httptest.Server that handles the POST to
+// /ivp/livedata/stream, returning the given sc_stream status value.
+func enableModeMux(t *testing.T, enableStatus string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("/ivp/livedata/stream", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("/ivp/livedata/stream: want POST, got %s", r.Method)
@@ -841,53 +835,35 @@ func streamMux(t *testing.T, enableStatus string, frames []map[string]any) *http
 			t.Errorf("encode sc_stream: %v", err)
 		}
 	})
-
-	mux.HandleFunc("/ivp/livedata/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		for _, frame := range frames {
-			if err := json.NewEncoder(w).Encode(frame); err != nil {
-				t.Errorf("encode frame: %v", err)
-				return
-			}
-			// Flush after each frame so the client's scanner sees it
-			// immediately rather than waiting for the connection to close.
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-		}
-		// Closing the handler signals EOF to the scanner.
-	})
-
 	return httptest.NewServer(mux)
 }
 
-func TestClient_EnableLiveStream(t *testing.T) {
+func TestClient_EnableHighFrequencyMode(t *testing.T) {
 	t.Parallel()
-	srv := streamMux(t, "enabled", nil)
+	srv := enableModeMux(t, "enabled")
 	defer srv.Close()
 
-	if err := newTestClient(srv, "tok").EnableLiveStream(context.Background()); err != nil {
-		t.Fatalf("EnableLiveStream: %v", err)
+	if err := newTestClient(srv, "tok").EnableHighFrequencyMode(context.Background()); err != nil {
+		t.Fatalf("EnableHighFrequencyMode: %v", err)
 	}
 }
 
-func TestClient_EnableLiveStream_AlreadyEnabled(t *testing.T) {
+func TestClient_EnableHighFrequencyMode_AlreadyEnabled(t *testing.T) {
 	t.Parallel()
-	// Gateway returns "enabled" even when the stream was already active —
-	// EnableLiveStream should treat this as success, not an error.
-	srv := streamMux(t, "enabled", nil)
+	// Gateway returns "enabled" even when already active — should be a no-op.
+	srv := enableModeMux(t, "enabled")
 	defer srv.Close()
 
 	client := newTestClient(srv, "tok")
-	if err := client.EnableLiveStream(context.Background()); err != nil {
+	if err := client.EnableHighFrequencyMode(context.Background()); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	if err := client.EnableLiveStream(context.Background()); err != nil {
+	if err := client.EnableHighFrequencyMode(context.Background()); err != nil {
 		t.Fatalf("second call (already enabled): %v", err)
 	}
 }
 
-func TestClient_EnableLiveStream_Fails(t *testing.T) {
+func TestClient_EnableHighFrequencyMode_Fails(t *testing.T) {
 	t.Parallel()
 	// Gateway returns sc_stream != "enabled" — should be an error.
 	mux := http.NewServeMux()
@@ -900,149 +876,10 @@ func TestClient_EnableLiveStream_Fails(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	err := newTestClient(srv, "tok").EnableLiveStream(context.Background())
+	err := newTestClient(srv, "tok").EnableHighFrequencyMode(context.Background())
 	if err == nil {
 		t.Fatal("expected error when sc_stream=disabled, got nil")
 	}
-}
-
-func TestClient_StreamLiveData(t *testing.T) {
-	t.Parallel()
-
-	makeFrame := func(pvMW int64) map[string]any {
-		return map[string]any{
-			"connection": map[string]any{"sc_stream": "enabled"},
-			"meters": map[string]any{
-				"pv":      map[string]any{"agg_p_mw": pvMW},
-				"storage": map[string]any{"agg_p_mw": int64(0)},
-				"grid":    map[string]any{"agg_p_mw": int64(0)},
-				"load":    map[string]any{"agg_p_mw": pvMW},
-			},
-		}
-	}
-	frames := []map[string]any{
-		makeFrame(1000000), // 1000 W
-		makeFrame(2000000), // 2000 W
-		makeFrame(3000000), // 3000 W
-	}
-
-	srv := streamMux(t, "enabled", frames)
-	defer srv.Close()
-
-	var received []gateway.LiveData
-	err := newTestClient(srv, "tok").StreamLiveData(context.Background(),
-		func(ld gateway.LiveData) error {
-			received = append(received, ld)
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("StreamLiveData: %v", err)
-	}
-	if len(received) != 3 {
-		t.Fatalf("received %d frames, want 3", len(received))
-	}
-	assertEqual(t, "frame[0].PV", int64(1000000), received[0].Meters.PV.AggPowerMW)
-	assertEqual(t, "frame[1].PV", int64(2000000), received[1].Meters.PV.AggPowerMW)
-	assertEqual(t, "frame[2].PV", int64(3000000), received[2].Meters.PV.AggPowerMW)
-}
-
-func TestClient_StreamLiveData_ErrStopStream(t *testing.T) {
-	t.Parallel()
-	// Returning ErrStopStream from the callback should stop iteration and
-	// return nil to the caller — it is not an error condition.
-	makeFrame := func(pvMW int64) map[string]any {
-		return map[string]any{
-			"connection": map[string]any{"sc_stream": "enabled"},
-			"meters": map[string]any{
-				"pv": map[string]any{"agg_p_mw": pvMW},
-			},
-		}
-	}
-	srv := streamMux(t, "enabled", []map[string]any{
-		makeFrame(1000000),
-		makeFrame(2000000), // should never be delivered
-	})
-	defer srv.Close()
-
-	count := 0
-	err := newTestClient(srv, "tok").StreamLiveData(context.Background(),
-		func(ld gateway.LiveData) error {
-			count++
-			return gateway.ErrStopStream
-		},
-	)
-	if err != nil {
-		t.Fatalf("StreamLiveData returned non-nil error on ErrStopStream: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("callback called %d times, want 1", count)
-	}
-}
-
-func TestClient_StreamLiveData_ContextCancel(t *testing.T) {
-	t.Parallel()
-	// When the context is cancelled, StreamLiveData should return ctx.Err().
-	// The handler blocks until the request context is done so we have a live
-	// connection to cancel.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ivp/livedata/stream", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]string{"sc_stream": "enabled"}); err != nil {
-			t.Errorf("encode: %v", err)
-		}
-	})
-	mux.HandleFunc("/ivp/livedata/status", func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done() // block until the client cancels
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	err := newTestClient(srv, "tok").StreamLiveData(ctx, func(gateway.LiveData) error { return nil })
-	if err == nil {
-		t.Fatal("expected error on context cancellation, got nil")
-	}
-}
-
-func TestClient_StreamLiveData_SSEFormat(t *testing.T) {
-	t.Parallel()
-	// Verify the scanner handles SSE "data: {...}" lines correctly.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ivp/livedata/stream", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]string{"sc_stream": "enabled"}); err != nil {
-			t.Errorf("encode: %v", err)
-		}
-	})
-	mux.HandleFunc("/ivp/livedata/status", func(w http.ResponseWriter, r *http.Request) {
-		// Write one frame in SSE format with a preceding metadata line and
-		// an empty separator line — both should be skipped.
-		w.Header().Set("Content-Type", "text/event-stream")
-		frame, _ := json.Marshal(map[string]any{
-			"connection": map[string]any{"sc_stream": "enabled"},
-			"meters":     map[string]any{"pv": map[string]any{"agg_p_mw": int64(5000000)}},
-		})
-		fmt.Fprintf(w, ": heartbeat\n")
-		fmt.Fprintf(w, "data: %s\n", frame)
-		fmt.Fprintf(w, "\n")
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	var got gateway.LiveData
-	err := newTestClient(srv, "tok").StreamLiveData(context.Background(),
-		func(ld gateway.LiveData) error {
-			got = ld
-			return gateway.ErrStopStream
-		},
-	)
-	if err != nil {
-		t.Fatalf("StreamLiveData: %v", err)
-	}
-	assertEqual(t, "PV agg_p_mw", int64(5000000), got.Meters.PV.AggPowerMW)
 }
 
 // ─────────────────────────── helpers ─────────────────────────────────────────

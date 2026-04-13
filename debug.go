@@ -17,8 +17,7 @@ type DebugOption func(*debugTransport)
 // (method, URL, auth presence) and response metadata (status, Content-Type).
 //
 // The first 4 KiB of each body is captured and logged when the response body
-// is closed. For normal JSON endpoints the full response is visible; for the
-// streaming connection the initial frames appear at disconnect time.
+// is closed.
 func WithDebugBodies() DebugOption {
 	return func(t *debugTransport) {
 		t.logBodies = true
@@ -37,9 +36,7 @@ func WithDebugBodies() DebugOption {
 // debug logging is not active.
 func WithDebugLogging(opts ...DebugOption) Option {
 	return func(c *Client) {
-		api := newDebugTransport(c.httpClient.Transport, opts...)
-		c.httpClient.Transport = api
-		c.streamTransport = newDebugTransport(c.streamTransport, opts...)
+		c.httpClient.Transport = newDebugTransport(c.httpClient.Transport, opts...)
 	}
 }
 
