@@ -1,3 +1,3 @@
 module github.com/hobeone/enphase-gateway
 
-go 1.22
+go 1.24

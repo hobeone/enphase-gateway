@@ -69,10 +69,7 @@ func SnapshotFromLiveData(d LiveData) EnergySnapshot {
 	}
 
 	// Solar directly to load = total solar minus what went to grid or battery.
-	s.SolarToLoad = s.SolarW - s.SolarToGrid - s.SolarToBatt
-	if s.SolarToLoad < 0 {
-		s.SolarToLoad = 0
-	}
+	s.SolarToLoad = max(0.0, s.SolarW-s.SolarToGrid-s.SolarToBatt)
 
 	return s
 }

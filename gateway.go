@@ -28,11 +28,21 @@ import (
 
 const defaultTimeout = 15 * time.Second
 
+// noCopy prevents Client values from being copied after first use.
+// Embedding it causes go vet to report an error if a Client is copied
+// (e.g. passed by value or assigned with *). This is the same technique
+// used by sync.Mutex, sync.WaitGroup, and strings.Builder.
+type noCopy struct{}
+
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
+
 // Client communicates with a local Enphase IQ Gateway over HTTPS.
 // The gateway uses a self-signed TLS certificate; the client skips verification
 // by default, which is required for local-network gateway access.
-// Client is safe for concurrent use.
+// Client is safe for concurrent use; do not copy after first use.
 type Client struct {
+	noCopy     noCopy //nolint:unused
 	baseURL    string
 	mu         sync.RWMutex
 	jwt        string

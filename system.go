@@ -48,13 +48,8 @@ func (c *Client) SystemInfo(ctx context.Context) (SystemInfo, error) {
 		return SystemInfo{}, &Error{StatusCode: resp.StatusCode, Endpoint: "/info"}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return SystemInfo{}, fmt.Errorf("read /info: %w", err)
-	}
-
 	var info SystemInfo
-	if err := xml.Unmarshal(body, &info); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&info); err != nil {
 		return SystemInfo{}, fmt.Errorf("decode /info: %w", err)
 	}
 	return info, nil

@@ -52,6 +52,9 @@ func (c *Client) BatteryInventory(ctx context.Context) ([]BatteryStatus, error) 
 	}
 	for _, e := range entries {
 		if e.Type == "ENCHARGE" {
+			if e.Devices == nil {
+				return []BatteryStatus{}, nil
+			}
 			return e.Devices, nil
 		}
 	}
