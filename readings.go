@@ -33,6 +33,14 @@ type CTReading struct {
 	Channels []CTChannel `json:"channels"`
 }
 
+// TypedCTReading pairs a raw CT reading with the measurement type
+// (production, net-consumption, total-consumption) inferred from the
+// gateway's meter configuration.
+type TypedCTReading struct {
+	CTReading
+	MeasurementType string
+}
+
 // MeterReadings returns instantaneous readings from all installed CTs,
 // including production, storage, and consumption transformers.
 // Data is refreshed every 5 minutes by the gateway firmware.

@@ -156,7 +156,7 @@ func doPost(ctx context.Context, client *http.Client, endpoint, contentType stri
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: HTTP %s", endpoint, resp.Status)
 	}

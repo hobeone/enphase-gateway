@@ -67,7 +67,7 @@ func (t *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var reqBody string
 	if t.logBodies && req.Body != nil && req.Body != http.NoBody {
 		data, err := io.ReadAll(io.LimitReader(req.Body, debugBodyLimit))
-		req.Body.Close()
+		_ = req.Body.Close()
 		if err == nil {
 			req.Body = io.NopCloser(bytes.NewReader(data))
 			reqBody = string(data)

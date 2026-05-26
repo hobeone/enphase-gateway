@@ -42,11 +42,14 @@ func (*noCopy) Unlock() {}
 // by default, which is required for local-network gateway access.
 // Client is safe for concurrent use; do not copy after first use.
 type Client struct {
-	noCopy     noCopy //nolint:unused
-	baseURL    string
-	mu         sync.RWMutex
-	jwt        string
-	httpClient *http.Client
+	noCopy             noCopy //nolint:unused
+	baseURL            string
+	mu                 sync.RWMutex
+	jwt                string
+	httpClient         *http.Client
+	insecureSkipVerify bool
+	meterTypesMu       sync.Mutex
+	meterTypes         map[int64]string // EID -> MeasurementType; nil until loaded
 }
 
 // Gateway is the interface implemented by Client. Embed or accept this
@@ -55,6 +58,7 @@ type Client struct {
 type Gateway interface {
 	LiveData(ctx context.Context) (LiveData, error)
 	MeterReadings(ctx context.Context) ([]CTReading, error)
+	TypedMeterReadings(ctx context.Context) ([]TypedCTReading, error)
 	GridReadings(ctx context.Context) ([]GridReading, error)
 	Meters(ctx context.Context) ([]MeterConfig, error)
 	Consumption(ctx context.Context) (ConsumptionReport, error)
@@ -74,7 +78,11 @@ type Option func(*Client)
 // WithTimeout sets the HTTP client timeout. Default: 15s.
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) {
-		c.httpClient.Timeout = d
+		if c.httpClient == nil {
+			c.httpClient = &http.Client{Timeout: d}
+		} else {
+			c.httpClient.Timeout = d
+		}
 	}
 }
 
@@ -86,31 +94,79 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
-// newTLSTransport returns a fresh *http.Transport that skips TLS verification.
+// WithInsecureSkipVerify sets whether the HTTP client skips TLS certificate verification.
+func WithInsecureSkipVerify(skip bool) Option {
+	return func(c *Client) {
+		c.insecureSkipVerify = skip
+	}
+}
+
+// newTLSTransport returns a fresh *http.Transport that configures TLS verification.
 // Each call produces an independent transport with its own connection pool.
-func newTLSTransport() *http.Transport {
+func newTLSTransport(insecure bool) *http.Transport {
 	return &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // gateway self-signed cert by design
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}, //nolint:gosec
 	}
 }
 
 // NewClient creates a Client targeting the given gateway address.
 // addr may be a bare hostname ("envoy.local", "192.168.1.10") or a full URL
 // ("https://envoy.local"). When no scheme is present, HTTPS is assumed.
-// The self-signed TLS certificate is accepted automatically.
+// The self-signed TLS certificate is accepted automatically if insecure is true.
 func NewClient(addr, jwt string, opts ...Option) *Client {
 	c := &Client{
-		baseURL: toBaseURL(addr),
-		jwt:     jwt,
-		httpClient: &http.Client{
-			Transport: newTLSTransport(),
-			Timeout:   defaultTimeout,
-		},
+		baseURL:            toBaseURL(addr),
+		jwt:                jwt,
+		insecureSkipVerify: true, // Maintain backwards compatibility default of skipping TLS verify
 	}
 	for _, o := range opts {
 		o(c)
 	}
+	if c.httpClient == nil {
+		c.httpClient = &http.Client{
+			Transport: newTLSTransport(c.insecureSkipVerify),
+			Timeout:   defaultTimeout,
+		}
+	}
 	return c
+}
+
+// TypedMeterReadings returns instantaneous readings from all installed CTs
+// mapped to their respective measurement types using the gateway's meter configuration.
+// It caches the meter types mapping on first successful call.
+func (c *Client) TypedMeterReadings(ctx context.Context) ([]TypedCTReading, error) {
+	c.meterTypesMu.Lock()
+	if c.meterTypes == nil {
+		c.meterTypesMu.Unlock()
+		meters, err := c.Meters(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("fetch meter config: %w", err)
+		}
+		temp := make(map[int64]string, len(meters))
+		for _, m := range meters {
+			temp[m.EID] = m.MeasurementType
+		}
+		c.meterTypesMu.Lock()
+		if c.meterTypes == nil {
+			c.meterTypes = temp
+		}
+	}
+	meterTypes := c.meterTypes
+	c.meterTypesMu.Unlock()
+
+	readings, err := c.MeterReadings(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]TypedCTReading, len(readings))
+	for i, r := range readings {
+		result[i] = TypedCTReading{
+			CTReading:       r,
+			MeasurementType: meterTypes[r.EID],
+		}
+	}
+	return result, nil
 }
 
 // SetJWT updates the JWT used for subsequent requests.
@@ -142,7 +198,7 @@ func (c *Client) doJSON(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return fmt.Errorf("request %s: %w", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return &Error{StatusCode: resp.StatusCode, Endpoint: path}

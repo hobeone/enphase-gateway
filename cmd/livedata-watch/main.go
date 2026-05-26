@@ -45,7 +45,7 @@ func loadConfig(path string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var cfg config
 	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
 		return config{}, fmt.Errorf("parse %s: %w", path, err)
@@ -117,6 +117,8 @@ func runHighFreq(ctx context.Context, client *gateway.Client) {
 		fmt.Fprintf(os.Stderr, "enable high-frequency mode: %v\n", err)
 		return
 	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 	for {
 		ld, err := client.LiveData(ctx)
 		if err != nil {
@@ -130,7 +132,7 @@ func runHighFreq(ctx context.Context, client *gateway.Client) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Second):
+		case <-ticker.C:
 		}
 	}
 }
@@ -138,6 +140,8 @@ func runHighFreq(ctx context.Context, client *gateway.Client) {
 // runPoll fetches /ivp/livedata/status on a fixed interval.
 func runPoll(ctx context.Context, client *gateway.Client, interval time.Duration) {
 	fmt.Fprintf(os.Stderr, "polling every %s ...\n", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
 		ld, err := client.LiveData(ctx)
 		if err != nil {
@@ -151,7 +155,7 @@ func runPoll(ctx context.Context, client *gateway.Client, interval time.Duration
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(interval):
+		case <-ticker.C:
 		}
 	}
 }

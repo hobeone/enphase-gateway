@@ -51,7 +51,7 @@ func (c *Client) EnableHighFrequencyMode(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("request /ivp/livedata/stream: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return &Error{StatusCode: resp.StatusCode, Endpoint: "/ivp/livedata/stream"}

@@ -58,7 +58,7 @@ func loadConfigFile(path string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var cfg config
 	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
 		return config{}, fmt.Errorf("parse %s: %w", path, err)
